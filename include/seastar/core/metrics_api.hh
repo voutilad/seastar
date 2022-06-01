@@ -38,6 +38,9 @@ namespace metrics {
 namespace impl {
 
 using labels_type = std::map<sstring, sstring>;
+
+int default_handle();
+
 }
 }
 }
@@ -203,6 +206,8 @@ public:
 };
 
 class impl;
+using metric_implementations = std::unordered_map<int, ::seastar::shared_ptr<impl>>;
+metric_implementations& get_metric_implementations();
 
 class registered_metric {
     metric_info _info;
@@ -399,7 +404,7 @@ using values_reference = shared_ptr<values_copy>;
 
 foreign_ptr<values_reference> get_values();
 
-shared_ptr<impl> get_local_impl();
+shared_ptr<impl> get_local_impl(int handle = default_handle());
 
 void unregister_metric(const metric_id & id);
 
