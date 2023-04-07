@@ -33,16 +33,21 @@ namespace seastar {
 extern seastar::logger seastar_logger;
 namespace metrics {
 
+int default_handle() {
+    return impl::default_handle();
+};
+
 double_registration::double_registration(std::string what): std::runtime_error(what) {}
 
-metric_groups::metric_groups() noexcept : _impl(impl::create_metric_groups()) {
+metric_groups::metric_groups(int handle) noexcept : _impl(impl::create_metric_groups(handle)) {
 }
 
 void metric_groups::clear() {
-    _impl = impl::create_metric_groups();
+    const auto current_handle = _impl->get_handle();
+    _impl = impl::create_metric_groups(current_handle);
 }
 
-metric_groups::metric_groups(std::initializer_list<metric_group_definition> mg) : _impl(impl::create_metric_groups()) {
+metric_groups::metric_groups(std::initializer_list<metric_group_definition> mg, int handle) : _impl(impl::create_metric_groups(handle)) {
     for (auto&& i : mg) {
         add_group(i.name, i.metrics);
     }
@@ -55,10 +60,9 @@ metric_groups& metric_groups::add_group(const group_name_type& name, const std::
     _impl->add_group(name, l);
     return *this;
 }
-metric_group::metric_group() noexcept = default;
+metric_group::metric_group(int handle) noexcept : metric_groups(handle) {}
 metric_group::~metric_group() = default;
-metric_group::metric_group(const group_name_type& name, std::initializer_list<metric_definition> l) {
-    add_group(name, l);
+metric_group::metric_group(const group_name_type& name, std::initializer_list<metric_definition> l, int handle) : metric_groups({metric_group_definition(name, l)}, handle) {
 }
 
 metric_group_definition::metric_group_definition(const group_name_type& name, std::initializer_list<metric_definition> l) : name(name), metrics(l) {
@@ -104,11 +108,11 @@ options::options(program_options::option_group* parent_group)
 {
 }
 
-future<> configure(const options& opts) {
+future<> configure(const options& opts, int handle) {
     impl::config c;
     c.hostname = opts.metrics_hostname.get_value();
-    return smp::invoke_on_all([c] {
-        impl::get_local_impl()->set_config(c);
+    return smp::invoke_on_all([c, handle] {
+        impl::get_local_impl(handle)->set_config(c);
     });
 }
 
@@ -190,8 +194,8 @@ static std::string get_unique_id() {
 label shard_label("shard");
 namespace impl {
 
-registered_metric::registered_metric(metric_id id, metric_function f, bool enabled, skip_when_empty skip) :
-        _f(f), _impl(get_local_impl()) {
+registered_metric::registered_metric(metric_id id, metric_function f, bool enabled, skip_when_empty skip, int handle) :
+        _f(f), _impl(get_local_impl(handle)) {
     _info.enabled = enabled;
     _info.should_skip_when_empty = skip;
     _info.id = id;
@@ -265,13 +269,15 @@ metric_definition_impl& metric_definition_impl::set_skip_when_empty(bool skip) n
     return *this;
 }
 
-std::unique_ptr<metric_groups_def> create_metric_groups() {
-    return  std::make_unique<metric_groups_impl>();
+std::unique_ptr<metric_groups_def> create_metric_groups(int handle) {
+    return  std::make_unique<metric_groups_impl>(handle);
 }
+
+metric_groups_impl::metric_groups_impl(int handle) : _handle(handle) {}
 
 metric_groups_impl::~metric_groups_impl() {
     for (const auto& i : _registration) {
-        unregister_metric(i);
+        unregister_metric(i, _handle);
     }
 }
 
@@ -279,7 +285,8 @@ metric_groups_impl& metric_groups_impl::add_metric(group_name_type name, const m
 
     metric_id id(name, md._impl->name, md._impl->labels);
 
-    get_local_impl()->add_registration(id, md._impl->type, md._impl->f, md._impl->d, md._impl->enabled, md._impl->_skip_when_empty, md._impl->aggregate_labels);
+    get_local_impl(_handle)->add_registration(
+            id, md._impl->type, md._impl->f, md._impl->d, md._impl->enabled, md._impl->_skip_when_empty, md._impl->aggregate_labels, _handle);
 
     _registration.push_back(id);
     return *this;
@@ -297,6 +304,10 @@ metric_groups_impl& metric_groups_impl::add_group(group_name_type name, const st
         add_metric(name, *i);
     }
     return *this;
+}
+
+int metric_groups_impl::get_handle() const {
+    return _handle;
 }
 
 bool metric_id::operator<(
@@ -319,13 +330,17 @@ bool metric_id::operator==(
     return as_tuple() == id2.as_tuple();
 }
 
-// Unfortunately, metrics_impl can not be shared because it
-// need to be available before the first users (reactor) will call it
+shared_ptr<impl> get_local_impl(int handle) {
+    auto& impls = get_metric_implementations();
+    auto [it, inserted] = impls.try_emplace(handle);
 
-shared_ptr<impl>  get_local_impl() {
-    static thread_local auto the_impl = ::seastar::make_shared<impl>();
-    return the_impl;
+    if (inserted) {
+        it->second = ::seastar::make_shared<impl>();
+    }
+
+    return it->second;
 }
+
 void impl::remove_registration(const metric_id& id) {
     auto i = get_value_map().find(id.full_name());
     if (i != get_value_map().end()) {
@@ -341,20 +356,23 @@ void impl::remove_registration(const metric_id& id) {
     }
 }
 
-void unregister_metric(const metric_id & id) {
-    get_local_impl()->remove_registration(id);
+void unregister_metric(const metric_id & id, int handle) {
+    get_local_impl(handle)->remove_registration(id);
 }
 
-const value_map& get_value_map() {
-    return get_local_impl()->get_value_map();
+const value_map& get_value_map(int handle) {
+    return get_local_impl(handle)->get_value_map();
 }
 
-foreign_ptr<values_reference> get_values() {
+foreign_ptr<values_reference> get_values(int handle) {
     shared_ptr<values_copy> res_ref = ::seastar::make_shared<values_copy>();
     auto& res = *(res_ref.get());
     auto& mv = res.values;
-    res.metadata = get_local_impl()->metadata();
-    auto & functions = get_local_impl()->functions();
+
+    auto impl = get_local_impl(handle);
+    res.metadata = impl->metadata();
+    auto & functions = impl->functions();
+
     mv.reserve(functions.size());
     for (auto&& i : functions) {
         value_vector values;
@@ -420,8 +438,8 @@ std::vector<std::vector<metric_function>>& impl::functions() {
     return _current_metrics;
 }
 
-void impl::add_registration(const metric_id& id, const metric_type& type, metric_function f, const description& d, bool enabled, skip_when_empty skip, const std::vector<std::string>& aggregate_labels) {
-    auto rm = ::seastar::make_shared<registered_metric>(id, f, enabled, skip);
+void impl::add_registration(const metric_id& id, const metric_type& type, metric_function f, const description& d, bool enabled, skip_when_empty skip, const std::vector<std::string>& aggregate_labels, int handle) {
+    auto rm = ::seastar::make_shared<registered_metric>(id, f, enabled, skip, handle);
     for (auto&& rl : _relabel_configs) {
         apply_relabeling(rl, rm->info());
     }
@@ -494,6 +512,11 @@ future<metric_relabeling_result> impl::set_relabel_configs(const std::vector<rel
     }
     return make_ready_future<metric_relabeling_result>(conflicts);
 }
+
+int default_handle() {
+    return 0;
+}
+
 }
 
 const bool metric_disabled = false;

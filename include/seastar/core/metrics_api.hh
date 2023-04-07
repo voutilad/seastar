@@ -38,6 +38,9 @@ namespace metrics {
 namespace impl {
 
 using labels_type = std::map<sstring, sstring>;
+
+int default_handle();
+
 }
 }
 }
@@ -191,25 +194,29 @@ struct metric_info {
 using metrics_registration = std::vector<metric_id>;
 
 class metric_groups_impl : public metric_groups_def {
+    int _handle;
     metrics_registration _registration;
 public:
-    metric_groups_impl() = default;
+    explicit metric_groups_impl(int handle = default_handle());
     ~metric_groups_impl();
     metric_groups_impl(const metric_groups_impl&) = delete;
     metric_groups_impl(metric_groups_impl&&) = default;
     metric_groups_impl& add_metric(group_name_type name, const metric_definition& md);
     metric_groups_impl& add_group(group_name_type name, const std::initializer_list<metric_definition>& l);
     metric_groups_impl& add_group(group_name_type name, const std::vector<metric_definition>& l);
+    int get_handle() const;
 };
 
 class impl;
+using metric_implementations = std::unordered_map<int, ::seastar::shared_ptr<impl>>;
+metric_implementations& get_metric_implementations();
 
 class registered_metric {
     metric_info _info;
     metric_function _f;
     shared_ptr<impl> _impl;
 public:
-    registered_metric(metric_id id, metric_function f, bool enabled=true, skip_when_empty skip=skip_when_empty::no);
+    registered_metric(metric_id id, metric_function f, bool enabled=true, skip_when_empty skip=skip_when_empty::no, int handle=default_handle());
     virtual ~registered_metric() {}
     virtual metric_value operator()() const {
         return _f();
@@ -361,7 +368,7 @@ public:
         return _value_map;
     }
 
-    void add_registration(const metric_id& id, const metric_type& type, metric_function f, const description& d, bool enabled, skip_when_empty skip, const std::vector<std::string>& aggregate_labels);
+    void add_registration(const metric_id& id, const metric_type& type, metric_function f, const description& d, bool enabled, skip_when_empty skip, const std::vector<std::string>& aggregate_labels, int handle = default_handle());
     void remove_registration(const metric_id& id);
     future<> stop() {
         return make_ready_future<>();
@@ -394,14 +401,15 @@ public:
     }
 };
 
-const value_map& get_value_map();
+const value_map& get_value_map(int handle = default_handle());
 using values_reference = shared_ptr<values_copy>;
 
-foreign_ptr<values_reference> get_values();
+foreign_ptr<values_reference> get_values(int handle = default_handle());
 
-shared_ptr<impl> get_local_impl();
+shared_ptr<impl> get_local_impl(int handle = default_handle());
 
-void unregister_metric(const metric_id & id);
+
+void unregister_metric(const metric_id & id, int handle = default_handle());
 
 /*!
  * \brief initialize metric group
@@ -409,7 +417,7 @@ void unregister_metric(const metric_id & id);
  * Create a metric_group_def.
  * No need to use it directly.
  */
-std::unique_ptr<metric_groups_def> create_metric_groups();
+std::unique_ptr<metric_groups_def> create_metric_groups(int handle = default_handle());
 
 }
 
@@ -426,7 +434,7 @@ struct options : public program_options::option_group {
 /*!
  * \brief set the metrics configuration
  */
-future<> configure(const options& opts);
+future<> configure(const options& opts, int handle = default_handle());
 
 /*!
  * \brief Perform relabeling and operation on metrics dynamically.
