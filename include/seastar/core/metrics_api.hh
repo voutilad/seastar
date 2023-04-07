@@ -232,6 +232,11 @@ public:
     void set_skip_when_empty(skip_when_empty skip) noexcept {
         _info.should_skip_when_empty = skip;
     }
+
+    skip_when_empty get_skip_when_empty() const {
+        return _info.should_skip_when_empty;
+    }
+
     const metric_id& get_id() const {
         return _info.id;
     }
@@ -359,6 +364,7 @@ class impl {
     std::set<sstring> _labels;
     std::vector<std::vector<metric_function>> _current_metrics;
     std::vector<relabel_config> _relabel_configs;
+    std::unordered_multimap<seastar::sstring, int> _metric_families_to_replicate;
 public:
     value_map& get_value_map() {
         return _value_map;
@@ -399,6 +405,37 @@ public:
     const std::vector<relabel_config>& get_relabel_configs() const noexcept {
         return _relabel_configs;
     }
+
+    // Set the metrics families to be replicated from this metrics::impl.
+    // All metrics families that match one of the keys of
+    // the 'metric_families_to_replicate' argument will be replicated
+    // on the metrics::impl identified by the corresponding value.
+    //
+    // If this function was called previously, any previously
+    // replicated metrics will be removed before the provided ones are
+    // replicated.
+    //
+    // Metric replication spans the full life cycle of this class.
+    // Newly registered metrics that belong to a replicated family
+    // be replicated too and unregistering a replicated metric will
+    // unregister the replica.
+    void set_metric_families_to_replicate(
+            std::unordered_multimap<seastar::sstring, int> metric_families_to_replicate);
+
+private:
+    void replicate_metric_family(const seastar::sstring& name,
+                                 int destination_handle) const;
+    void replicate_metric_if_required(const shared_ptr<registered_metric>& metric) const;
+    void replicate_metric(const shared_ptr<registered_metric>& metric,
+                          const metric_family& family,
+                          const shared_ptr<impl>& destination,
+                          int destination_handle) const;
+
+    void remove_metric_replica_family(const seastar::sstring& name,
+                                      int destination_handle) const;
+    void remove_metric_replica(const metric_id& id,
+                               const shared_ptr<impl>& destination) const;
+    void remove_metric_replica_if_required(const metric_id& id) const;
 };
 
 const value_map& get_value_map(int handle = default_handle());
@@ -487,6 +524,12 @@ future<metric_relabeling_result> set_relabel_configs(const std::vector<relabel_c
  * This function returns a vector of the current relabel configs
  */
 const std::vector<relabel_config>& get_relabel_configs();
+
+/*!
+ * \brief replicate metric families accross internal metrics implementations
+ */
+future<>
+replicate_metric_families(int source_handle, std::unordered_multimap<seastar::sstring, int> metric_families_to_replicate);
 
 }
 }

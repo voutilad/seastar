@@ -178,6 +178,17 @@ static bool apply_relabeling(const relabel_config& rc, impl::metric_info& info) 
     return true;
 }
 
+future<>
+replicate_metric_families(
+        int source_handle,
+        std::unordered_multimap<seastar::sstring, int> metric_families_to_replicate) {
+    return smp::invoke_on_all([source_handle, metric_families_to_replicate] {
+        auto source_impl = impl::get_local_impl(source_handle);
+        source_impl->set_metric_families_to_replicate(
+                std::move(metric_families_to_replicate));
+    });
+}
+
 bool label_instance::operator!=(const label_instance& id2) const {
     auto& id1 = *this;
     return !(id1 == id2);
@@ -342,6 +353,8 @@ shared_ptr<impl> get_local_impl(int handle) {
 }
 
 void impl::remove_registration(const metric_id& id) {
+    remove_metric_replica_if_required(id);
+
     auto i = get_value_map().find(id.full_name());
     if (i != get_value_map().end()) {
         auto j = i->second.find(id.labels());
@@ -353,6 +366,36 @@ void impl::remove_registration(const metric_id& id) {
             get_value_map().erase(i);
         }
         dirty();
+    }
+}
+
+void impl::remove_metric_replica_family(const seastar::sstring& name,
+                                        int destination_handle) const {
+    auto entry = _value_map.find(name);
+
+    if (entry == _value_map.end()) {
+        return;
+    }
+
+    auto destination = get_local_impl(destination_handle);
+    for (const auto& metric_instance: entry->second) {
+        const auto& registered_metric = metric_instance.second;
+        remove_metric_replica(registered_metric->get_id(),
+                              destination);
+    }
+}
+
+void impl::remove_metric_replica(const metric_id& id,
+                                 const shared_ptr<impl>& destination) const {
+    destination->remove_registration(id);
+}
+
+void impl::remove_metric_replica_if_required(const metric_id& id) const {
+    auto [begin, end] = _metric_families_to_replicate.equal_range(id.full_name());
+
+    for (; begin != end; ++begin) {
+        auto destination = get_local_impl(begin->second);
+        remove_metric_replica(id, destination);
     }
 }
 
@@ -392,6 +435,68 @@ instance_id_type shard() {
     }
 
     return sstring("0");
+}
+
+void
+impl::set_metric_families_to_replicate(
+        std::unordered_multimap<seastar::sstring, int> metric_families_to_replicate) {
+    // Remove all previous metric replica families
+    for (const auto& [name, destination]: _metric_families_to_replicate) {
+        remove_metric_replica_family(name, destination);
+    }
+
+    // Replicate the specified metric families.
+    for (const auto& [name, destination]: metric_families_to_replicate) {
+        replicate_metric_family(name, destination);
+    }
+
+    _metric_families_to_replicate = std::move(metric_families_to_replicate);
+}
+
+void impl::replicate_metric_family(const seastar::sstring& name,
+                                   int destination_handle) const {
+    const auto& entry = _value_map.find(name);
+
+    if (entry == _value_map.end()) {
+        return;
+    }
+
+    const auto& metric_family = entry->second;
+    auto destination = get_local_impl(destination_handle);
+    for (const auto& [labels, metric_ptr]: metric_family) {
+        replicate_metric(metric_ptr, metric_family, destination, destination_handle);
+    }
+}
+
+void impl::replicate_metric_if_required(const shared_ptr<registered_metric>& metric) const {
+    auto full_name = metric->get_id().full_name();
+    auto [begin, end]= _metric_families_to_replicate.equal_range(full_name);
+
+    for (; begin != end; ++begin) {
+        const auto& [name, destination_handle] = *begin;
+        const auto& metric_family = _value_map.at(name);
+
+        auto destination = get_local_impl(destination_handle);
+        replicate_metric(metric, metric_family, destination, destination_handle);
+    }
+}
+
+void impl::replicate_metric(const shared_ptr<registered_metric>& metric,
+                            const metric_family& family,
+                            const shared_ptr<impl>& destination,
+                            int destination_handle) const {
+    const auto& family_info = family.info();
+    metric_type type = { .base_type = family_info.type,
+                         .type_name = family_info.inherit_type };
+
+    destination->add_registration(metric->get_id(),
+                                  type,
+                                  metric->get_function(),
+                                  family_info.d,
+                                  metric->is_enabled(),
+                                  metric->get_skip_when_empty(),
+                                  family_info.aggregate_labels,
+                                  destination_handle);
 }
 
 void impl::update_metrics_if_needed() {
@@ -466,6 +571,8 @@ void impl::add_registration(const metric_id& id, const metric_type& type, metric
         _value_map[name][rm->info().id.labels()] = rm;
     }
     dirty();
+
+    replicate_metric_if_required(rm);
 }
 
 future<metric_relabeling_result> impl::set_relabel_configs(const std::vector<relabel_config>& relabel_configs) {
