@@ -51,10 +51,13 @@ namespace seastar {
 namespace metrics {
 
 namespace impl {
+int default_handle();
 class metric_groups_def;
 struct metric_definition_impl;
 class metric_groups_impl;
 }
+
+int default_handle();
 
 using group_name_type = sstring; /*!< A group of logically related metrics */
 class metric_groups;
@@ -89,7 +92,7 @@ public:
 class metric_groups {
     std::unique_ptr<impl::metric_groups_def> _impl;
 public:
-    metric_groups() noexcept;
+    explicit metric_groups(int handle = default_handle()) noexcept;
     metric_groups(metric_groups&&) = default;
     virtual ~metric_groups();
     metric_groups& operator=(metric_groups&&) = default;
@@ -98,7 +101,7 @@ public:
      *
      * combine the constructor with the add_group functionality.
      */
-    metric_groups(std::initializer_list<metric_group_definition> mg);
+    metric_groups(std::initializer_list<metric_group_definition> mg, int handle = default_handle());
 
     /*!
      * \brief Add metrics belonging to the same group.
@@ -154,7 +157,7 @@ public:
  */
 class metric_group : public metric_groups {
 public:
-    metric_group() noexcept;
+    explicit metric_group(int handle = default_handle()) noexcept;
     metric_group(const metric_group&) = delete;
     metric_group(metric_group&&) = default;
     virtual ~metric_group();
@@ -165,7 +168,7 @@ public:
      *
      *
      */
-    metric_group(const group_name_type& name, std::initializer_list<metric_definition> l);
+    metric_group(const group_name_type& name, std::initializer_list<metric_definition> l, int handle = default_handle());
 };
 
 

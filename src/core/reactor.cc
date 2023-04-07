@@ -891,7 +891,7 @@ reactor::task_queue::register_stats() {
         }, sm::description("Total amount in milliseconds we were in violation of the task quota"),
            {group_label}),
     });
-    _metrics = std::exchange(new_metrics, {});
+    _metrics = std::exchange(new_metrics, sm::metric_groups{});
 }
 
 void
@@ -3788,6 +3788,12 @@ smp_options::smp_options(program_options::option_group* parent_group)
     , allow_cpus_in_remote_numa_nodes(*this, "allow-cpus-in-remote-numa-nodes", program_options::unused{})
 #endif
 {
+}
+
+thread_local metrics::impl::metric_implementations metric_impls;
+
+metrics::impl::metric_implementations& metrics::impl::get_metric_implementations() {
+    return metric_impls;
 }
 
 thread_local scollectd::impl scollectd_impl;
